@@ -250,7 +250,7 @@ def _procesar_hoja(nombre_hoja: str, df_crudo: pd.DataFrame) -> list[CasoEnferme
     return casos
 
 
-@st.cache_data(show_spinner="Cargando base de datos...")
+@st.cache_resource(show_spinner="Cargando base de datos...")
 def cargar_base_de_datos(ruta: str, mtime: float) -> list[CasoEnfermeria]:
     """Lee el Excel interno. ``mtime`` invalida la caché si el archivo cambia."""
     excel = pd.ExcelFile(ruta, engine="openpyxl")
