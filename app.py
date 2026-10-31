@@ -14,6 +14,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Optional
 
+import openpyxl
 import pandas as pd
 import streamlit as st
 
@@ -163,7 +164,25 @@ class CasoEnfermeria:
 # Mini-ETL
 # ---------------------------------------------------------------------------
 
-def _procesar_hoja(nombre_hoja: str, df_crudo: pd.DataFrame) -> list[CasoEnfermeria]:
+def _leer_hoja_con_combinadas(ws) -> tuple[pd.DataFrame, pd.DataFrame]:
+    """Devuelve dos tablas del mismo tamaño:
+      - crudo: solo la celda superior-izquierda de cada celda combinada
+        (sirve para saber dónde EMPIEZA cada diagnóstico / intervención).
+      - lleno: el valor de la celda combinada repetido en todas las filas
+        que abarca (sirve para leer hallazgos, dominio, resultado, etc.)."""
+    filas = [list(r) for r in ws.iter_rows(values_only=True)]
+    crudo = pd.DataFrame(filas, dtype=object)
+    lleno = crudo.copy()
+    for rng in ws.merged_cells.ranges:
+        valor = ws.cell(rng.min_row, rng.min_col).value
+        for r in range(rng.min_row - 1, rng.max_row):
+            for c in range(rng.min_col - 1, rng.max_col):
+                if r < lleno.shape[0] and c < lleno.shape[1]:
+                    lleno.iat[r, c] = valor
+    return crudo, lleno
+
+
+def _procesar_hoja(nombre_hoja: str, df_crudo: pd.DataFrame, df_lleno: pd.DataFrame) -> list[CasoEnfermeria]:
     if df_crudo.empty:
         return []
 
@@ -171,12 +190,19 @@ def _procesar_hoja(nombre_hoja: str, df_crudo: pd.DataFrame) -> list[CasoEnferme
     if idx_encabezado is None:
         return []
 
-    df_hoja = df_crudo.copy()
-    df_hoja.columns = [
+    nombres = [
         str(c).strip() if pd.notna(c) else f"Columna_{i}"
-        for i, c in enumerate(df_hoja.iloc[idx_encabezado].tolist())
+        for i, c in enumerate(df_crudo.iloc[idx_encabezado].tolist())
     ]
-    df_hoja = df_hoja.iloc[idx_encabezado + 1:].dropna(how="all").reset_index(drop=True)
+    df_hoja = df_crudo.iloc[idx_encabezado + 1:].copy()
+    df_full = df_lleno.iloc[idx_encabezado + 1:].copy()
+    df_hoja.columns = nombres
+    df_full.columns = nombres
+
+    # Se descartan solo las filas totalmente vacías en la hoja original.
+    con_datos = df_hoja.notna().any(axis=1)
+    df_hoja = df_hoja[con_datos].reset_index(drop=True)
+    df_full = df_full[con_datos].reset_index(drop=True)
     if df_hoja.empty:
         return []
 
@@ -185,12 +211,8 @@ def _procesar_hoja(nombre_hoja: str, df_crudo: pd.DataFrame) -> list[CasoEnferme
     if col_diag is None:
         return []
 
-    # Las celdas combinadas de Excel llegan como NaN salvo la primera:
-    # se rellenan hacia abajo para los campos "de cabecera" de cada caso.
-    lleno = df_hoja.ffill(axis=0)
-
     def valor_para(col: Optional[str], pos: int) -> Optional[str]:
-        return None if col is None else _texto_limpio(lleno.at[pos, col])
+        return None if col is None else _texto_limpio(df_full.at[pos, col])
 
     # Cada diagnóstico no vacío abre un caso; cada intervención no vacía,
     # una intervención dentro del caso.
@@ -201,9 +223,7 @@ def _procesar_hoja(nombre_hoja: str, df_crudo: pd.DataFrame) -> list[CasoEnferme
     else:
         bloque_interv = bloque_diag
 
-    df_trabajo = df_hoja.copy()
-    df_trabajo["_bloque_diag"] = bloque_diag
-    df_trabajo["_bloque_interv"] = bloque_interv
+    df_trabajo = pd.DataFrame({"_bloque_diag": bloque_diag, "_bloque_interv": bloque_interv})
     df_trabajo["_pos"] = range(len(df_trabajo))
     df_trabajo = df_trabajo[df_trabajo["_bloque_diag"] >= 1]
 
@@ -213,23 +233,26 @@ def _procesar_hoja(nombre_hoja: str, df_crudo: pd.DataFrame) -> list[CasoEnferme
     casos: list[CasoEnfermeria] = []
     for _, grupo_diag in df_trabajo.groupby("_bloque_diag", sort=True):
         primera = int(grupo_diag["_pos"].iloc[0])
+        posiciones = [int(p) for p in grupo_diag["_pos"]]
 
+        # Los hallazgos suelen estar en una celda combinada que abarca varios
+        # diagnósticos: todos ellos comparten esos hallazgos.
         hallazgos: list[str] = []
         if col_hallazgos is not None:
-            for v in grupo_diag[col_hallazgos]:
-                t = _texto_limpio(v)
+            for p in posiciones:
+                t = _texto_limpio(df_full.at[p, col_hallazgos])
                 if t and t not in hallazgos:
                     hallazgos.append(t)
 
         intervenciones: list[Intervencion] = []
         for _, sub in grupo_diag.groupby("_bloque_interv", sort=True):
-            pos_interv = int(sub["_pos"].iloc[0])
-            texto = valor_para(col_interv, pos_interv) if col_interv else None
+            pos_sub = [int(p) for p in sub["_pos"]]
+            texto = valor_para(col_interv, pos_sub[0]) if col_interv else None
 
             actividades: list[str] = []
             if col_actividad is not None:
-                for v in sub[col_actividad]:
-                    t = _texto_limpio(v)
+                for p in pos_sub:
+                    t = _texto_limpio(df_full.at[p, col_actividad])
                     if t and t not in actividades:
                         actividades.append(t)
 
@@ -242,7 +265,7 @@ def _procesar_hoja(nombre_hoja: str, df_crudo: pd.DataFrame) -> list[CasoEnferme
             riesgo=valor_para(columnas["riesgo"], primera),
             dominio=valor_para(columnas["dominio"], primera),
             resultado=valor_para(columnas["resultado"], primera),
-            evaluacion=_texto_limpio(df_hoja.at[primera, columnas["evaluacion"]]) if columnas["evaluacion"] else None,
+            evaluacion=valor_para(columnas["evaluacion"], primera),
             hallazgos=hallazgos,
             intervenciones=intervenciones,
         ))
@@ -253,12 +276,12 @@ def _procesar_hoja(nombre_hoja: str, df_crudo: pd.DataFrame) -> list[CasoEnferme
 @st.cache_resource(show_spinner="Cargando base de datos...")
 def cargar_base_de_datos(ruta: str, mtime: float) -> list[CasoEnfermeria]:
     """Lee el Excel interno. ``mtime`` invalida la caché si el archivo cambia."""
-    excel = pd.ExcelFile(ruta, engine="openpyxl")
+    libro = openpyxl.load_workbook(ruta, data_only=True)
     casos: list[CasoEnfermeria] = []
-    for nombre_hoja in excel.sheet_names:
+    for ws in libro.worksheets:
         try:
-            df_crudo = excel.parse(sheet_name=nombre_hoja, header=None)
-            casos.extend(_procesar_hoja(nombre_hoja, df_crudo))
+            crudo, lleno = _leer_hoja_con_combinadas(ws)
+            casos.extend(_procesar_hoja(ws.title, crudo, lleno))
         except Exception:
             continue
     return casos
@@ -314,19 +337,23 @@ def _renderizar_caso(caso: CasoEnfermeria, numero: int) -> None:
         _mostrar_campo("Evaluación del plan de cuidado", caso.evaluacion)
 
 
-def _grupos_por_caso(casos_hoja: list[CasoEnfermeria]) -> list[tuple[str, CasoEnfermeria]]:
-    """Una cajita por caso, titulada con sus hallazgos fusionados.
-    Los casos sin hallazgos se titulan con su diagnóstico."""
-    grupos: list[tuple[str, CasoEnfermeria]] = []
+def _grupos_por_hallazgos(casos_hoja: list[CasoEnfermeria]) -> list[tuple[str, list[CasoEnfermeria]]]:
+    """Agrupa en una sola cajita los diagnósticos que comparten los mismos
+    hallazgos (celda combinada en el Excel). El título son los hallazgos."""
+    grupos: dict[tuple[str, ...], list[CasoEnfermeria]] = {}
     for caso in casos_hoja:
-        if caso.hallazgos:
-            titulo = ", ".join(_normalizar_espacios(h) for h in caso.hallazgos)
+        grupos.setdefault(tuple(caso.hallazgos), []).append(caso)
+
+    resultado: list[tuple[str, list[CasoEnfermeria]]] = []
+    for hallazgos, lista in grupos.items():
+        if hallazgos:
+            titulo = " ".join(_normalizar_espacios(h) for h in hallazgos)
+            if len(titulo) > 140:
+                titulo = titulo[:137] + "..."
         else:
-            titulo = f"Sin hallazgo específico — {caso.diagnostico or PLACEHOLDER}"
-        if len(titulo) > 140:
-            titulo = titulo[:137] + "..."
-        grupos.append((titulo, caso))
-    return grupos
+            titulo = "Sin hallazgo específico asociado"
+        resultado.append((titulo, lista))
+    return resultado
 
 
 # ---------------------------------------------------------------------------
@@ -336,6 +363,8 @@ def _grupos_por_caso(casos_hoja: list[CasoEnfermeria]) -> list[tuple[str, CasoEn
 COLOR_INICIO = "#B37FE0"
 COLOR_DX_MEDICO = "#1FAE6B"
 COLOR_HALLAZGOS = "#FF3FA4"
+COLOR_DOMINIO = "#3FA7FF"
+COLOR_DIAGNOSTICO = "#FF7FC0"
 
 
 def _inyectar_estilos_flujo() -> None:
@@ -353,6 +382,13 @@ def _inyectar_estilos_flujo() -> None:
             white-space: normal;
             overflow-wrap: break-word;
             max-width: 100%;
+        }
+        .subtitulo-seccion {
+            font-size: 0.8rem;
+            font-weight: 800;
+            letter-spacing: 0.06em;
+            color: #6B5B95;
+            margin: 10px 0 0 2px;
         }
         .caja-hallazgos {
             background: #FFE3F3;
@@ -410,20 +446,30 @@ def _vista_guiada_por_diagnostico_medico(casos: list[CasoEnfermeria]) -> None:
         COLOR_HALLAZGOS,
     )
 
-    grupos = _grupos_por_caso(casos_hoja)
+    grupos = _grupos_por_hallazgos(casos_hoja)
     if not grupos:
         st.markdown(f'<div class="caja-hallazgos">{PLACEHOLDER}</div>', unsafe_allow_html=True)
         return
 
-    for titulo, caso in grupos:
-        with st.expander(f"🔎 {titulo}", expanded=False):
-            for h in caso.hallazgos:
+    for titulo, lista_casos in grupos:
+        n_dx = len(lista_casos)
+        sufijo = f"  ·  {n_dx} diagnósticos" if n_dx > 1 else ""
+        with st.expander(f"🔎 {titulo}{sufijo}", expanded=False):
+            # Hallazgos (compartidos por todos los diagnósticos de la cajita)
+            for h in lista_casos[0].hallazgos:
                 st.markdown(f"- {_md(h)}")
-            if caso.hallazgos:
-                st.write("")
-            _pill(f"🩺 {caso.diagnostico or PLACEHOLDER}", "#FF7FC0")
-            _mostrar_campo("Resultado esperado", caso.resultado)
-            _renderizar_intervenciones(caso.intervenciones)
+
+            for j, caso in enumerate(lista_casos):
+                if j > 0:
+                    st.divider()
+                else:
+                    st.write("")
+
+                _pill(f"🧭 Dominio: {caso.dominio or PLACEHOLDER}", COLOR_DOMINIO)
+                st.markdown('<div class="subtitulo-seccion">DIAGNÓSTICO DE ENFERMERÍA</div>', unsafe_allow_html=True)
+                _pill(f"🩺 {caso.diagnostico or PLACEHOLDER}", COLOR_DIAGNOSTICO)
+                _mostrar_campo("Resultado esperado", caso.resultado)
+                _renderizar_intervenciones(caso.intervenciones)
 
 
 def _vista_busqueda_libre(casos: list[CasoEnfermeria]) -> None:
