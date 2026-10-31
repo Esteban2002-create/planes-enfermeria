@@ -79,12 +79,6 @@ def _md(texto: str) -> str:
     return "  \n".join(l for l in lineas if l)
 
 
-def _con_noc(texto: str) -> str:
-    """Agrega '(NOC)' al final de cada párrafo/línea del resultado esperado."""
-    lineas = [l.strip() for l in texto.replace("\t", " ").splitlines() if l.strip()]
-    return "\n".join(l if l.endswith("(NOC)") else f"{l} (NOC)" for l in lineas)
-
-
 def _es_valor_vacio(valor: object) -> bool:
     if valor is None:
         return True
@@ -302,7 +296,7 @@ def _mostrar_campo(etiqueta: str, valor: Optional[str]) -> None:
 
 
 def _mostrar_resultado(valor: Optional[str]) -> None:
-    _mostrar_campo("Resultado esperado", _con_noc(valor) if valor else None)
+    _mostrar_campo("Resultado esperado (NOC)", valor)
 
 
 def _renderizar_intervenciones(intervenciones: list[Intervencion]) -> None:
@@ -321,30 +315,6 @@ def _renderizar_intervenciones(intervenciones: list[Intervencion]) -> None:
                     st.markdown(f"- {_md(act)}")
             else:
                 st.markdown(PLACEHOLDER)
-
-
-def _renderizar_caso(caso: CasoEnfermeria, numero: int) -> None:
-    st.markdown(f"##### Coincidencia {numero} — Diagnóstico: *{caso.diagnostico or PLACEHOLDER}*")
-
-    col_izq, col_der = st.columns(2)
-    with col_izq:
-        _mostrar_campo("Riesgo a prevenir", caso.riesgo)
-        _mostrar_campo("Dominio", caso.dominio)
-    with col_der:
-        _mostrar_campo("Diagnóstico de Enfermería", caso.diagnostico)
-        _mostrar_resultado(caso.resultado)
-
-    st.markdown("**Hallazgos:**")
-    if caso.hallazgos:
-        for h in caso.hallazgos:
-            st.markdown(f"- {_md(h)}")
-    else:
-        st.markdown(f"- {PLACEHOLDER}")
-
-    _renderizar_intervenciones(caso.intervenciones)
-
-    if caso.evaluacion:
-        _mostrar_campo("Evaluación del plan de cuidado", caso.evaluacion)
 
 
 def _cajas_por_diagnostico(casos_hoja: list[CasoEnfermeria]) -> list[tuple[str, CasoEnfermeria]]:
@@ -486,33 +456,6 @@ def _vista_guiada_por_diagnostico_medico(casos: list[CasoEnfermeria]) -> None:
             _renderizar_intervenciones(caso.intervenciones)
 
 
-def _vista_busqueda_libre(casos: list[CasoEnfermeria]) -> None:
-    st.markdown("### 🔎 Buscador por diagnóstico")
-    termino = st.text_input("Escribe un diagnóstico o palabra clave (ej. 'Dolor', 'Hepatitis C')", value="")
-
-    termino_norm = _normalizar(termino)
-    if not termino_norm:
-        st.caption("Escribe un término para buscar en la columna 'Diagnóstico de Enfermería'.")
-        return
-
-    coincidencias = [
-        c for c in casos
-        if c.diagnostico and termino_norm in _normalizar(c.diagnostico)
-    ]
-    if not coincidencias:
-        st.warning("No se encontraron coincidencias para ese término en ninguna hoja.")
-        return
-
-    st.markdown(f"**{len(coincidencias)} coincidencia(s) encontrada(s), agrupadas por hoja:**")
-    st.divider()
-
-    for hoja in sorted({c.hoja for c in coincidencias}, key=_normalizar):
-        st.markdown(f"### {hoja.upper()}")
-        for i, caso in enumerate([c for c in coincidencias if c.hoja == hoja], start=1):
-            _renderizar_caso(caso, i)
-        st.divider()
-
-
 # ---------------------------------------------------------------------------
 # Interfaz principal
 # ---------------------------------------------------------------------------
@@ -520,7 +463,7 @@ def _vista_busqueda_libre(casos: list[CasoEnfermeria]) -> None:
 def main() -> None:
     _inyectar_estilos_flujo()
     st.title("🩺 Buscador de Planes de Cuidados de Enfermería")
-    st.caption("Consulta los planes de cuidado por diagnóstico médico o por diagnóstico de enfermería.")
+    st.caption("Selecciona un diagnóstico médico para consultar sus planes de cuidado de enfermería.")
 
     if not RUTA_EXCEL.exists():
         st.error(f"No se encontró la base de datos en: {RUTA_EXCEL}")
@@ -536,17 +479,7 @@ def main() -> None:
         st.error("No se pudo extraer ningún caso de enfermería de la base de datos.")
         return
 
-    modo = st.radio(
-        "Modo de navegación",
-        options=["Explorar por diagnóstico médico (guiado)", "Buscar directo por diagnóstico de enfermería"],
-        label_visibility="collapsed",
-    )
-    st.divider()
-
-    if modo.startswith("Explorar"):
-        _vista_guiada_por_diagnostico_medico(casos)
-    else:
-        _vista_busqueda_libre(casos)
+    _vista_guiada_por_diagnostico_medico(casos)
 
 
 if __name__ == "__main__":
