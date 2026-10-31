@@ -79,6 +79,12 @@ def _md(texto: str) -> str:
     return "  \n".join(l for l in lineas if l)
 
 
+def _con_noc(texto: str) -> str:
+    """Agrega '(NOC)' al final de cada párrafo/línea del resultado esperado."""
+    lineas = [l.strip() for l in texto.replace("\t", " ").splitlines() if l.strip()]
+    return "\n".join(l if l.endswith("(NOC)") else f"{l} (NOC)" for l in lineas)
+
+
 def _es_valor_vacio(valor: object) -> bool:
     if valor is None:
         return True
@@ -295,6 +301,10 @@ def _mostrar_campo(etiqueta: str, valor: Optional[str]) -> None:
     st.markdown(f"**{etiqueta}:** {_md(valor) if valor else PLACEHOLDER}")
 
 
+def _mostrar_resultado(valor: Optional[str]) -> None:
+    _mostrar_campo("Resultado esperado", _con_noc(valor) if valor else None)
+
+
 def _renderizar_intervenciones(intervenciones: list[Intervencion]) -> None:
     st.markdown("**Intervenciones / Actividades:**")
     if not intervenciones:
@@ -322,7 +332,7 @@ def _renderizar_caso(caso: CasoEnfermeria, numero: int) -> None:
         _mostrar_campo("Dominio", caso.dominio)
     with col_der:
         _mostrar_campo("Diagnóstico de Enfermería", caso.diagnostico)
-        _mostrar_campo("Resultado esperado", caso.resultado)
+        _mostrar_resultado(caso.resultado)
 
     st.markdown("**Hallazgos:**")
     if caso.hallazgos:
@@ -337,23 +347,34 @@ def _renderizar_caso(caso: CasoEnfermeria, numero: int) -> None:
         _mostrar_campo("Evaluación del plan de cuidado", caso.evaluacion)
 
 
-def _grupos_por_hallazgos(casos_hoja: list[CasoEnfermeria]) -> list[tuple[str, list[CasoEnfermeria]]]:
-    """Agrupa en una sola cajita los diagnósticos que comparten los mismos
-    hallazgos (celda combinada en el Excel). El título son los hallazgos."""
-    grupos: dict[tuple[str, ...], list[CasoEnfermeria]] = {}
+def _cajas_por_diagnostico(casos_hoja: list[CasoEnfermeria]) -> list[tuple[str, CasoEnfermeria]]:
+    """Una cajita independiente por cada diagnóstico de enfermería. El título
+    son sus hallazgos; si varios diagnósticos comparten los mismos hallazgos,
+    se numera para distinguirlos."""
+    cajas: list[tuple[str, CasoEnfermeria]] = []
     for caso in casos_hoja:
-        grupos.setdefault(tuple(caso.hallazgos), []).append(caso)
-
-    resultado: list[tuple[str, list[CasoEnfermeria]]] = []
-    for hallazgos, lista in grupos.items():
-        if hallazgos:
-            titulo = " ".join(_normalizar_espacios(h) for h in hallazgos)
-            if len(titulo) > 140:
-                titulo = titulo[:137] + "..."
+        if caso.hallazgos:
+            titulo = " ".join(_normalizar_espacios(h) for h in caso.hallazgos)
         else:
-            titulo = "Sin hallazgo específico asociado"
-        resultado.append((titulo, lista))
-    return resultado
+            titulo = f"Sin hallazgo específico — {_normalizar_espacios(caso.diagnostico or PLACEHOLDER)}"
+        if len(titulo) > 140:
+            titulo = titulo[:137] + "..."
+        cajas.append((titulo, caso))
+
+    totales: dict[str, int] = {}
+    for titulo, _ in cajas:
+        totales[titulo] = totales.get(titulo, 0) + 1
+
+    vistos: dict[str, int] = {}
+    finales: list[tuple[str, CasoEnfermeria]] = []
+    for titulo, caso in cajas:
+        if totales[titulo] > 1:
+            vistos[titulo] = vistos.get(titulo, 0) + 1
+            titulo_final = f"{titulo}  ·  diagnóstico {vistos[titulo]} de {totales[titulo]}"
+        else:
+            titulo_final = titulo
+        finales.append((titulo_final, caso))
+    return finales
 
 
 # ---------------------------------------------------------------------------
@@ -446,30 +467,23 @@ def _vista_guiada_por_diagnostico_medico(casos: list[CasoEnfermeria]) -> None:
         COLOR_HALLAZGOS,
     )
 
-    grupos = _grupos_por_hallazgos(casos_hoja)
-    if not grupos:
+    cajas = _cajas_por_diagnostico(casos_hoja)
+    if not cajas:
         st.markdown(f'<div class="caja-hallazgos">{PLACEHOLDER}</div>', unsafe_allow_html=True)
         return
 
-    for titulo, lista_casos in grupos:
-        n_dx = len(lista_casos)
-        sufijo = f"  ·  {n_dx} diagnósticos" if n_dx > 1 else ""
-        with st.expander(f"🔎 {titulo}{sufijo}", expanded=False):
-            # Hallazgos (compartidos por todos los diagnósticos de la cajita)
-            for h in lista_casos[0].hallazgos:
+    for titulo, caso in cajas:
+        with st.expander(f"🔎 {titulo}", expanded=False):
+            for h in caso.hallazgos:
                 st.markdown(f"- {_md(h)}")
+            if caso.hallazgos:
+                st.write("")
 
-            for j, caso in enumerate(lista_casos):
-                if j > 0:
-                    st.divider()
-                else:
-                    st.write("")
-
-                _pill(f"🧭 Dominio: {caso.dominio or PLACEHOLDER}", COLOR_DOMINIO)
-                st.markdown('<div class="subtitulo-seccion">DIAGNÓSTICO DE ENFERMERÍA</div>', unsafe_allow_html=True)
-                _pill(f"🩺 {caso.diagnostico or PLACEHOLDER}", COLOR_DIAGNOSTICO)
-                _mostrar_campo("Resultado esperado", caso.resultado)
-                _renderizar_intervenciones(caso.intervenciones)
+            _pill(f"🧭 Dominio: {caso.dominio or PLACEHOLDER}", COLOR_DOMINIO)
+            st.markdown('<div class="subtitulo-seccion">DIAGNÓSTICO DE ENFERMERÍA</div>', unsafe_allow_html=True)
+            _pill(f"🩺 {caso.diagnostico or PLACEHOLDER}", COLOR_DIAGNOSTICO)
+            _mostrar_resultado(caso.resultado)
+            _renderizar_intervenciones(caso.intervenciones)
 
 
 def _vista_busqueda_libre(casos: list[CasoEnfermeria]) -> None:
